@@ -40,7 +40,7 @@ jobs:
             echo "::error::No merged PR found for ${RELEASE} (${GITHUB_SHA}). Release from a commit on main that came from a PR."
             exit 1
           fi
-          for package in migrations backend frontend; do
+          for package in backend dss; do
             image="ghcr.io/${REPO}/${package}:${PR}"
             if ! digest=$(docker buildx imagetools inspect "${image}" --format '{{.Manifest.Digest}}'); then
               echo "::error::Image ${image} not found. Packages must be public, and the release's commit must come from a PR that built images."
@@ -54,10 +54,7 @@ jobs:
     needs: [init]
     uses: ./.github/workflows/reusable-deploy.yml
     secrets:
-      db_password: ${{ secrets.db_password }}
       oc_token: ${{ secrets.oc_token }}
-      s3_user: ${{ secrets.s3_user }}
-      s3_password: ${{ secrets.s3_password }}
     with:
       environment: prod
       target: prod
@@ -80,7 +77,7 @@ jobs:
           oc_namespace: ${{ vars.OC_NAMESPACE }}
           app: ${{ github.event.repository.name }}
           components: |
-            frontend
+            dss
             backend
 
   promote:
@@ -91,7 +88,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        package: [migrations, backend, frontend]
+        package: [backend, dss]
     timeout-minutes: 1
     steps:
       - uses: shrink/actions-docker-registry-tag@e6aaef25c595b6e0edd18bf4c7dbfea3abd43299 # v5

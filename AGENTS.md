@@ -3,15 +3,14 @@
 Repository facts for automated coding assistants. Teams may edit or remove this file.
 
 ## Layout
-- `backend/` (NestJS, Prisma), `frontend/` (Vite, React, Caddy), `migrations/` (Flyway SQL in `migrations/sql/`)
-- OpenShift templates (not Helm): `common/openshift.init.yml`, `common/openshift.database.yml`, `common/openshift.backup.yml`, `backend/openshift.deploy.yml`, `frontend/openshift.deploy.yml`
+- `backend/` (stateless NestJS API facade), `dss/` (upstream `esig/dss-demonstrations` Tomcat WAR + Portage/Notarius truststore, internal `ClusterIP` only)
+- OpenShift templates (not Helm): `common/openshift.init.yml`, `backend/openshift.deploy.yml`, `dss/openshift.deploy.yml`
 - Workflows: `.github/workflows/` (PR deploys via `reusable-deploy.yml`, tests via `reusable-tests.yml`); integration and load tests in `common/tests/`
 - HTTP requests: Prefer native `fetch` over Axios for new HTTP requests; use Axios only when native fetch is insufficient (e.g. upload progress tracking, complex interceptors).
 
 ## Build, test, run
-- Full stack locally: `docker compose up` (optional profiles: `schemaspy`, `caddy`)
+- Full stack locally: `docker compose up`
 - Backend (`cd backend`): `npm ci`, `npm run build`, `npm run lint`, `npm test`, `npm run test:cov`
-- Frontend (`cd frontend`): `npm ci`, `npm run build`, `npm run lint`, `npm run test:unit`; e2e: `npx playwright install --with-deps chromium`, then `npx playwright test --project="chromium"`
 - Deploys to OpenShift run from GitHub Actions (PR open, merge), not from a workstation
 
 ## Shared actions

@@ -33,7 +33,7 @@ parameters:
     value: "128Mi"
   - name: MEMORY_LIMIT
     description: Memory limit for the container (bounds the pod's working set).
-    value: "4Gi"
+    value: "512Mi"
   - name: LOG_LEVEL
     description: Application log level (debug|info|warn|error)
     value: "info"
@@ -73,77 +73,6 @@ objects:
                       matchLabels:
                         deployment: ${NAME}-${ZONE}-${COMPONENT}
                     topologyKey: kubernetes.io/hostname
-          initContainers:
-            - name: wait-for-db
-              image: ${REGISTRY}/${ORG_NAME}/${NAME}/migrations:${IMAGE_TAG}
-              command:
-                - /bin/sh
-                - -c
-                - |
-                  echo "Waiting for database to be reachable..."
-                  max_retries=30
-                  attempt=1
-                  until nc -z -v -w3 ${NAME}-${ZONE}-database 5432; do
-                    if [ "$attempt" -ge "$max_retries" ]; then
-                      echo "ERROR: Database ${NAME}-${ZONE}-database:5432 is not reachable after ${max_retries} attempts." >&2
-                      exit 1
-                    fi
-                    echo "Database not ready (attempt ${attempt}/${max_retries}), sleeping..."
-                    attempt=$((attempt + 1))
-                    sleep 2
-                  done
-                  echo "Database is UP!"
-              securityContext:
-                allowPrivilegeEscalation: false
-                runAsNonRoot: true
-                readOnlyRootFilesystem: true
-                capabilities:
-                  drop: ["ALL"]
-                seccompProfile:
-                  type: RuntimeDefault
-              volumeMounts:
-                - name: tmp
-                  mountPath: /tmp
-            - name: migrations
-              image: ${REGISTRY}/${ORG_NAME}/${NAME}/migrations:${IMAGE_TAG}
-              imagePullPolicy: Always
-              env:
-                - name: POSTGRES_DATABASE
-                  valueFrom:
-                    secretKeyRef:
-                      name: ${NAME}-${ZONE}-database
-                      key: database-name
-                - name: FLYWAY_URL
-                  value: jdbc:postgresql://${NAME}-${ZONE}-database:5432/$(POSTGRES_DATABASE)
-                - name: FLYWAY_USER
-                  valueFrom:
-                    secretKeyRef:
-                      name: ${NAME}-${ZONE}-database
-                      key: database-user
-                - name: FLYWAY_PASSWORD
-                  valueFrom:
-                    secretKeyRef:
-                      name: ${NAME}-${ZONE}-database
-                      key: database-password
-                - name: FLYWAY_DEFAULT_SCHEMA
-                  value: "users"
-                - name: FLYWAY_BASELINE_ON_MIGRATE
-                  value: "true"
-              resources:
-                requests:
-                  cpu: 10m
-                  memory: 50Mi
-              securityContext:
-                allowPrivilegeEscalation: false
-                runAsNonRoot: true
-                readOnlyRootFilesystem: true
-                capabilities:
-                  drop: ["ALL"]
-                seccompProfile:
-                  type: RuntimeDefault
-              volumeMounts:
-                - name: tmp
-                  mountPath: /tmp
           containers:
             - name: ${NAME}
               image: ${REGISTRY}/${ORG_NAME}/${NAME}/${COMPONENT}:${IMAGE_TAG}
@@ -154,27 +83,8 @@ objects:
               env:
                 - name: LOG_LEVEL
                   value: ${LOG_LEVEL}
-                - name: POSTGRES_HOST
-                  value: ${NAME}-${ZONE}-database
-                - name: POSTGRES_PORT
-                  value: "5432"
-                - name: POSTGRES_DATABASE
-                  valueFrom:
-                    secretKeyRef:
-                      name: ${NAME}-${ZONE}-database
-                      key: database-name
-                - name: POSTGRES_USER
-                  valueFrom:
-                    secretKeyRef:
-                      name: ${NAME}-${ZONE}-database
-                      key: database-user
-                - name: POSTGRES_PASSWORD
-                  valueFrom:
-                    secretKeyRef:
-                      name: ${NAME}-${ZONE}-database
-                      key: database-password
-                - name: POSTGRES_SCHEMA
-                  value: "users"
+                - name: DSS_URL
+                  value: http://${NAME}-${ZONE}-dss
               resources:
                 requests:
                   cpu: ${CPU_REQUEST}
@@ -233,6 +143,24 @@ objects:
           targetPort: 3000
       selector:
         deployment: ${NAME}-${ZONE}-${COMPONENT}
+  - apiVersion: route.openshift.io/v1
+    kind: Route
+    metadata:
+      annotations:
+        # Router sticky cookie defaults to SameSite=None (ZAP 10054).
+        router.openshift.io/cookie-same-site: Lax
+      labels:
+        app: ${NAME}-${ZONE}
+      name: ${NAME}-${ZONE}-${COMPONENT}
+    spec:
+      host: ${NAME}-${ZONE}.${DOMAIN}
+      to:
+        kind: Service
+        name: ${NAME}-${ZONE}-${COMPONENT}
+        weight: 100
+      tls:
+        termination: edge
+        insecureEdgeTerminationPolicy: Redirect
   - apiVersion: autoscaling/v2
     kind: HorizontalPodAutoscaler
     metadata:

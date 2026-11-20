@@ -22,5 +22,5 @@ jobs:
       oc_token: ${{ secrets.oc_token }}
     with:
       cleanup: label
-      packages: backend frontend migrations
+      packages: backend dss
 
