@@ -5,30 +5,78 @@
 
 # Signature Verifier
 
-Shared, stateless digital signature verification service on OpenShift for BC Government applications.
+**In one sentence:** Send this API a signed PDF (like an engineer's sealed drawing), and it tells your app whether the digital signature is real, untouched, and from an approved BC professional—without saving the file anywhere.
 
-## Scope
+---
 
-- **Verification only:** Validates incoming cryptographically signed documents in memory and returns structured signature/certificate metadata. Uploaded files and PII are never persisted.
-- **Not a signing service:** This service does not issue certificates or apply signatures.
-  - Regulated professionals (e.g., EGBC, AIBC, FPBC) still require their own Portage CyberTech / Notarius `CertifiO` credential (or manual authentication) to sign documents.
-  - General non-regulated e-signatures in BC Gov use existing options such as OneSpan, CHEFS, or OCIO DCS.
+## Wait—what problem does this solve?
 
-## Architecture
+When an engineer, architect, or forester applies a digital seal (using Portage CyberTech / Notarius **CertifiO**), checking that PDF in code is surprisingly hard:
 
-- **`backend/` (NestJS / TypeScript):** Stateless HTTP facade exposed via OpenShift `Route`. Accepts `multipart/form-data` uploads, evaluates results against configured trust profiles, and exposes `/api/health`, `/api/metrics`, and Swagger docs at `/api/docs`.
-- **`dss/` (EU DSS `6.5.1`):** Upstream [`esig/dss-demonstrations`](https://github.com/esig/dss-demonstrations) (`dss-demo-webapp`) Tomcat WAR configured with Portage/Notarius Root CAs (`cron.tl.loader.enable = false`). Deployed as an internal `ClusterIP`-only Service (`NetworkPolicy` restricts ingress solely to `backend` pods; runs as non-root `USER 10001` with `readOnlyRootFilesystem: true`).
+- You cannot tell from the visual stamp image on the PDF whether the signature is real—anyone can paste a picture of a stamp.
+- Previously, each BC Gov app had to run its own paid **ConsignO Server Automation** sidecar container and manage a `CSA_LICENSE` secret just to call `validatePDF`.
+- Checking signatures properly requires full cryptographic certificate math, revocation checks ("was this person's licence cancelled?"), and timestamp handling.
 
-## Live Environments
+This repo replaces that per-app paid sidecar with **one shared, free, open-source API** on OpenShift.
 
-- **TEST:** `https://signature-verifier-test.apps.silver.devops.gov.bc.ca/api` ([Swagger](https://signature-verifier-test.apps.silver.devops.gov.bc.ca/api/docs))
-- **PROD:** `https://signature-verifier-prod.apps.silver.devops.gov.bc.ca/api` ([Swagger](https://signature-verifier-prod.apps.silver.devops.gov.bc.ca/api/docs))
+### What it does—and what it does NOT do
 
-## API Contract (`POST /api/v1/validate`)
+- **Checks signatures in memory only:** Your file stays in RAM while being checked and is discarded immediately after. No database, no disk storage, no saved PII.
+- **Does NOT sign documents:** It only *checks* existing signatures.
+  - Regulated professionals (EGBC, AIBC, FPBC) still sign using their own Portage/Notarius CertifiO credential.
+  - Regular (non-sealed) e-signatures in BC Gov use OneSpan, CHEFS, or OCIO DCS.
 
-### Request
+---
 
-Upload a document as `multipart/form-data` with field name `file` (up to `50 MiB`) and optional `profile` query parameter (`portage-notarius` default, or `default`):
+## How it works (the two-container setup, in plain English)
+
+There is **no web UI** and **no database**. The service runs just two containers in OpenShift:
+
+```text
+Your App / curl / Swagger UI
+        │
+        │  HTTPS (public OpenShift Route)
+        ▼
+┌───────────────────────────────┐
+│  1. backend (NestJS / Node)   │  ◄── The "Receptionist" (only container with a public URL)
+│     /api/v1/validate          │
+└───────────────┬───────────────┘
+                │
+                │  Internal OpenShift Service (locked down by NetworkPolicy)
+                ▼
+┌───────────────────────────────┐
+│  2. dss (EU DSS 6.5.1 Tomcat) │  ◄── The "Back-Room Math Checker" (no public URL)
+└───────────────┬───────────────┘
+                │
+                │  Outbound HTTP/HTTPS (port 80/443)
+                ▼
+     Notarius OCSP / CRL        ◄── Checks whether the signer's cert was ever revoked
+```
+
+1. **`backend/` — The Receptionist (NestJS / TypeScript):**
+   - The **only** part reachable from outside OpenShift (via the OpenShift `Route`).
+   - Accepts your uploaded file (`POST /api/v1/validate`), hands it to `dss`, checks BC Gov policy rules (e.g., *"Does this belong to EGBC, AIBC, or FPBC?"*), and returns simple JSON.
+   - Also provides `/api/health` (for OpenShift readiness checks), `/api/metrics` (for Prometheus), and `/api/docs` (an interactive Swagger page where you can test uploads right in your browser).
+
+2. **`dss/` — The Back-Room Math Checker (EU DSS `6.5.1`):**
+   - An off-the-shelf, open-source Java web app ([`esig/dss-demonstrations`](https://github.com/esig/dss-demonstrations)) built by the European Union for validating digital signatures. **We maintain zero custom Java code**—only a `Dockerfile` and config files (`dss/dss.properties` + public Notarius root certificates in `dss/certs/`).
+   - Has **no public Route**. It sits on an internal `ClusterIP` Service, and an OpenShift `NetworkPolicy` blocks everything except `backend` pods from talking to it.
+   - EU Trusted List downloading is disabled (`cron.tl.loader.enable = false`), so it starts in a few seconds and only trusts the root certificates we explicitly added (`dss/certs/`).
+
+---
+
+## Try it in 10 seconds
+
+- **TEST API:** `https://signature-verifier-test.apps.silver.devops.gov.bc.ca/api` ([Interactive Swagger UI](https://signature-verifier-test.apps.silver.devops.gov.bc.ca/api/docs))
+- **PROD API:** `https://signature-verifier-prod.apps.silver.devops.gov.bc.ca/api` ([Interactive Swagger UI](https://signature-verifier-prod.apps.silver.devops.gov.bc.ca/api/docs))
+
+### Option 1: Use your browser (no code needed)
+
+Open the **Interactive Swagger UI** link above, click **`POST /api/v1/validate`**, click **Try it out**, pick a PDF file, and click **Execute**.
+
+### Option 2: `curl` from your terminal
+
+Upload a file as `multipart/form-data` using form field `file` (max `50 MiB`) and optional query parameter `profile` (`portage-notarius` by default, or `default`):
 
 ```bash
 curl -sS \
@@ -36,15 +84,45 @@ curl -sS \
   "https://signature-verifier-test.apps.silver.devops.gov.bc.ca/api/v1/validate?profile=portage-notarius"
 ```
 
-### Response Status Codes
+### Option 3: Call it from Node / TypeScript (`fetch`)
 
-| HTTP Status | Meaning |
-| :--- | :--- |
-| `200 OK` | Validation completed; check JSON `status` (`valid`, `unsigned`, `unapproved_org`, `invalid`) |
-| `400 Bad Request` | Missing/empty `file` field or unknown `profile` |
-| `502 Bad Gateway` | Upstream `dss` validation engine unreachable or returned an error |
+```ts
+const form = new FormData()
+form.append('file', new Blob([pdfBytes], { type: 'application/pdf' }), 'drawing.pdf')
 
-### Example `200 OK` Response
+const res = await fetch(
+  'https://signature-verifier-prod.apps.silver.devops.gov.bc.ca/api/v1/validate?profile=portage-notarius',
+  { method: 'POST', body: form },
+)
+if (!res.ok) {
+  throw new Error(`Signature validation failed: HTTP ${res.status}`)
+}
+const result = await res.json()
+// Accepted when result.status === 'valid' && result.approvedSignaturesCount > 0
+```
+
+---
+
+## Understanding the response
+
+### HTTP status codes
+
+| HTTP Status | What happened | What to do |
+| :--- | :--- | :--- |
+| **`200 OK`** | The file was checked. (Even an *invalid* or *unsigned* PDF returns `200 OK`!) | Read `result.status` in the JSON body. |
+| **`400 Bad Request`** | You forgot the `file` upload, uploaded a `0`-byte file, or passed an unknown `?profile=` name. | Fix the request your app is sending. |
+| **`502 Bad Gateway`** | `backend` could not reach `dss`, or `dss` returned an error. | Retry or check `dss` pod logs in OpenShift. |
+
+### JSON `status` values (when HTTP is `200 OK`)
+
+| `status` | Plain-English meaning | Typical next step |
+| :--- | :--- | :--- |
+| **`valid`** | Real cryptographic signature, file was NOT modified after signing, AND (under `portage-notarius`) at least one signer belongs to an approved org (`EGBC`, `AIBC`, or `FPBC`). | Accept the document. |
+| **`unsigned`** | There are zero digital signatures in the file (for example, a plain PDF or an image of a stamp). | Reject and ask the user to digitally sign/seal the PDF. |
+| **`unapproved_org`** | The signature is mathematically real and trusted by Notarius, **but** none of the signers belong to `EGBC`, `AIBC`, or `FPBC` (for example, a generic Notarius test cert). | Reject if your workflow requires a BC regulated professional. |
+| **`invalid`** | Something failed—someone modified the document after signing (`HASH_FAILURE`), the issuer isn't trusted, or validation failed. | Reject and inspect `signatures[].errors` / `subIndication`. |
+
+### Example `200 OK` JSON response
 
 ```json
 {
@@ -77,43 +155,56 @@ curl -sS \
 }
 ```
 
-### Sample Consumer Call (Node `fetch`)
+### Wait—why does `"historicalLtv": true` show a warning on an older valid PDF?
 
-```ts
-const form = new FormData()
-form.append('file', new Blob([pdfBytes], { type: 'application/pdf' }), 'drawing.pdf')
+Signing certificates expire every 1–2 years, just like a driver's licence. If an engineer sealed a drawing in 2024 and you verify it in 2026, a strict "is the certificate valid *today*?" check fails because the 2024 cert has since expired.
 
-const res = await fetch(
-  'https://signature-verifier-prod.apps.silver.devops.gov.bc.ca/api/v1/validate?profile=portage-notarius',
-  { method: 'POST', body: form },
-)
-if (!res.ok) {
-  throw new Error(`Signature validation failed: HTTP ${res.status}`)
-}
-const result = await res.json()
-// result.status === 'valid' && result.approvedSignaturesCount > 0
-```
+However, most Notarius seals (`PAdES-BASELINE-T`) include a cryptographic **timestamp (`TSA`)**—essentially a tamper-proof digital postmark proving *when* the document was signed. When `backend` sees that a signature has a valid Notarius timestamp, it asks `dss`: *"Pretend it is `2024-06-12` (the timestamp time)—was the signature 100% valid then?"* If `dss` says `TOTAL_PASSED`, `backend` marks the signature `valid: true`, sets `historicalLtv: true`, and adds the informational message in `warnings`.
 
-### Migrating from `ConsignO Server Automation` (`validatePDF`)
+---
 
-Apps currently calling `POST /validatePDF` on a per-app `consigno-verifio-notarius-server` sidecar (such as `bcgov/HOUS-permit-portal`) can replace the sidecar + `CSA_LICENSE` secret with a single `POST /api/v1/validate` call:
+## Migrating from ConsignO Server Automation (`validatePDF`)
 
-- `status: "valid"` + `signatures[].approvedOrg` (`EGBC`, `AIBC`, `FPBC`) and `signatures[].subjectName` replace `DigitalSealSignatureFilter` regex checks.
-- `status: "unsigned"` replaces inspecting `response.result == "UNSIGNED"`.
-- `status: "unapproved_org"` indicates a cryptographically valid Notarius signature whose `subjectName` does not match the configured regulatory bodies.
-- `status: "invalid"` indicates hash tampering (`HASH_FAILURE`), untrusted chain, or failed validation (`signatures[].errors` / `subIndication`).
+If your app currently calls `POST /validatePDF` on a `consigno-verifio-notarius-server` sidecar (such as `bcgov/HOUS-permit-portal`), you can remove that sidecar and `CSA_LICENSE` secret and call `POST /api/v1/validate` instead:
 
-## Trust Profiles & Extending
+| Old ConsignO check | Signature Verifier equivalent |
+| :--- | :--- |
+| `DigitalSealSignatureFilter` regex on signer DN | `status === "valid"` + `signatures[].approvedOrg` (`EGBC`, `AIBC`, `FPBC`) and `signatures[].subjectName` |
+| `response.result == "UNSIGNED"` | `status === "unsigned"` |
+| Trusted signature from non-regulated org | `status === "unapproved_org"` |
+| Tampered file / bad chain | `status === "invalid"` (see `signatures[].errors` and `subIndication`) |
 
-See [`docs/trust-profiles.md`](docs/trust-profiles.md) for details on the `portage-notarius` and `default` profiles, historical `PAdES-BASELINE-T` handling, and adding new X.509 CAs or formats (`PAdES`, `XAdES`, `JAdES`, `CAdES`, `ASiC`). Background spike findings live in [`docs/spike-2-eu-dss-portage.md`](docs/spike-2-eu-dss-portage.md).
+---
 
-## Local Development
+## What is in each folder?
+
+| Path | What it is |
+| :--- | :--- |
+| `backend/` | NestJS API (`POST /api/v1/validate`, Swagger, trust profiles, Vitest unit tests, `openshift.deploy.yml`). |
+| `dss/` | EU DSS Tomcat container config, Notarius Root CA `.crt` files, and internal-only `openshift.deploy.yml`. |
+| `common/` | Shared OpenShift namespace init template (`openshift.init.yml`) and quickstart integration/load tests. |
+| `docs/` | [Trust profiles & adding CAs](docs/trust-profiles.md), architecture decision records (`docs/adr/`), and spike notes. |
+| `scripts/` | One-time repo/OpenShift/environment setup scripts (`setup.sh --plate <plate>`). |
+| `.github/workflows/` | CI/CD pipelines (build containers, deploy to DEV/TEST/PROD, security scans, Dependabot/Renovate). |
+
+---
+
+## Trust profiles & adding new certificate authorities
+
+See **[docs/trust-profiles.md](docs/trust-profiles.md)** for a plain-English guide to:
+- How `portage-notarius` vs `default` profiles differ.
+- Why EU Trusted Lists are turned off.
+- How to trust a new Certificate Authority (such as OCIO DCS or Government of Canada CAs) or other formats (`PAdES`, `XAdES`, `JAdES`, `CAdES`, `ASiC`).
+
+---
+
+## Local development
 
 ```bash
-# Start dss (8080) and backend (3000) locally
+# Run both containers locally: dss on :8080, backend on :3000
 docker compose up
 
-# Run backend lint, build, and tests
+# Run backend linter, formatting check, build, and unit tests
 cd backend
 npm ci
 npm run lint
@@ -122,9 +213,11 @@ npm run build
 npm run test:cov
 ```
 
-## OpenShift Deployment Prerequisites
+---
 
-- **Namespaces & GitHub wiring:** Provision DEV/TEST/PROD OpenShift namespaces and run `scripts/setup.sh --plate <plate> --apply` (previews without `--apply`).
-- **Secrets/Variables:** Requires `vars.OC_SERVER`, `vars.OC_NAMESPACE`, and `secrets.OC_TOKEN` (repo, `test`, and `prod` environments); no database or `DB_PASSWORD` is used by the application.
-- **Resources:** `dss` requests `512Mi` / limits `2Gi` RAM (`JAVA_OPTS=-Xms512m -Xmx1536m`); `backend` limits `512Mi` RAM.
-- **Network egress:** `dss` pods require outbound HTTP/HTTPS (`80`/`443`) access to Notarius OCSP/CRL responders (e.g., `ocsp1.notarius.com`) for live revocation checks.
+## OpenShift deployment notes
+
+- **Initial setup:** Provision DEV/TEST/PROD OpenShift namespaces and run `./scripts/setup.sh --plate <plate> --apply` (omit `--apply` to preview).
+- **GitHub secrets & variables:** Workflows expect `vars.OC_SERVER`, `vars.OC_NAMESPACE`, and `secrets.OC_TOKEN` for repo (DEV), `test`, and `prod` environments. The app itself uses **no database** and does not read `DB_PASSWORD`.
+- **Container memory:** `dss` requests `512Mi` / limits `2Gi` RAM (`JAVA_OPTS=-Xms512m -Xmx1536m`) because Java + PDF parsing needs headroom; `backend` limits `512Mi` RAM.
+- **Outbound internet from `dss`:** `dss` pods need outbound HTTP/HTTPS (`80`/`443`) to Notarius revocation servers (like `ocsp1.notarius.com`) so they can check whether a signer's certificate was ever revoked.
