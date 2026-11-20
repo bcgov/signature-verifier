@@ -36,6 +36,8 @@ jobs:
   init:
     name: Deploy (init)
     environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
     outputs:
       triggered: ${{ steps.deploy.outputs.triggered }}
     runs-on: ubuntu-26.04
@@ -54,6 +56,22 @@ jobs:
             -p NAME="${{ github.event.repository.name }}"
           triggers: ${{ inputs.triggers }}
           debug: true
+      - uses: bcgov/actions-openshift/oc-runner@47805d2fc4e919382757c1fbeb68d39313abe64f # v0.11.0
+        if: steps.deploy.outputs.triggered == 'true'
+        env:
+          APP_ZONE: ${{ github.event.repository.name }}-${{ inputs.target }}
+        with:
+          oc_namespace: ${{ vars.OC_NAMESPACE }}
+          oc_server: ${{ vars.oc_server }}
+          oc_token: ${{ secrets.oc_token }}
+          commands: |
+            # Remove orphaned starter frontend resources that still hold the zone Route host
+            oc delete route,service,deployment,hpa,pdb "${APP_ZONE}-frontend" --ignore-not-found
+            oc delete networkpolicy "${APP_ZONE}-frontend-ingress" --ignore-not-found
+            # Recreate backend Route if it was rejected with HostAlreadyClaimed
+            if oc get route "${APP_ZONE}-backend" -o jsonpath='{.status.ingress[*].conditions[?(@.type=="Admitted")].status}' 2>/dev/null | grep -qw False; then
+              oc delete route "${APP_ZONE}-backend" --ignore-not-found
+            fi
 
   deploy:
     name: Deploy (${{ matrix.name }})
