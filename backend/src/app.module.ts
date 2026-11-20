@@ -7,9 +7,10 @@ import { AppController } from './app.controller'
 import { MetricsController } from './metrics.controller'
 import { TerminusModule } from '@nestjs/terminus'
 import { HealthController } from './health.controller'
+import { ValidationModule } from './validation/validation.module'
 
 @Module({
-  imports: [ConfigModule.forRoot({ ignoreEnvFile: true }), TerminusModule],
+  imports: [ConfigModule.forRoot({ ignoreEnvFile: true }), TerminusModule, ValidationModule],
   controllers: [AppController, MetricsController, HealthController],
   providers: [AppService],
 })

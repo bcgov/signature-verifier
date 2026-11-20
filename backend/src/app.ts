@@ -28,6 +28,7 @@ export async function bootstrap(): Promise<NestExpressApplication> {
     .setTitle('Signature Verifier API')
     .setDescription('Standards-based digital signature verification API')
     .setVersion('1.0')
+    .addTag('validation')
     .build()
 
   const document = SwaggerModule.createDocument(app, config)
