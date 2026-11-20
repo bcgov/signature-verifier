@@ -36,8 +36,6 @@ jobs:
   init:
     name: Deploy (init)
     environment: ${{ inputs.environment }}
-    permissions:
-      contents: read
     outputs:
       triggered: ${{ steps.deploy.outputs.triggered }}
     runs-on: ubuntu-26.04
