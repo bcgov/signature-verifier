@@ -1,0 +1,104 @@
+name: Scheduled
+
+on:
+  schedule: [cron: "0 11 * * 6"] # 3 AM PST = 12 PM UDT, Saturdays
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  stale-branches:
+    name: Close Stale Branches & PRs
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
+    steps:
+      - uses: actions/stale@v11
+        with:
+          days-before-stale: 14
+          days-before-close: 7
+          stale-label: stale
+          close-issue-message: >
+            This issue has been marked stale due to no activity for 14 days.
+            It will be closed in 7 days if no action is taken.
+            If you still need this, please reopen or comment to reset the timer.
+          close-pr-message: >
+            This PR has been marked stale due to no activity for 14 days.
+            It will be closed in 7 days if no action is taken.
+            If you still need this, please reopen or request review to reset the timer.
+          remove-stale-when-updated: true
+          operations-per-run: 100
+          debug-only: false
+
+  ageOutPRs:
+    name: PR Deployment Purge
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Clean up stale PR deployments
+        uses: bcgov/actions-openshift/pr-env-cleanup@510a8105fdffbb718094e8a093e638132e300975 # v0.10.0
+        with:
+          oc_namespace: ${{ vars.OC_NAMESPACE }}
+          oc_server: ${{ vars.OC_SERVER }}
+          oc_token: ${{ secrets.OC_TOKEN }}
+
+  schema-spy:
+    name: SchemaSpy
+    permissions:
+      contents: write
+      pages: write
+    uses: bcgov/quickstart-openshift-helpers/.github/workflows/.schema-spy.yml@a11ad3d1b9288fb40757c4314a62eb86ff227931 # v1.2.1
+
+  # Run weekly DAST (OWASP ZAP + Nuclei) against TEST and upload SARIF to Security tab
+  zap:
+    name: ZAP & Nuclei Scans
+    permissions:
+      contents: read
+      security-events: write
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Scan TEST URL
+        uses: bcgov/actions/scan-url@6c8ac0469fcf0d826533bc526c90119b8f149884 # v0.13.0
+        with:
+          url: https://${{ github.event.repository.name }}-test.apps.silver.devops.gov.bc.ca
+
+  load-tests:
+    name: Load
+    runs-on: ubuntu-26.04
+    strategy:
+      matrix:
+        name: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: grafana/setup-k6-action@c47136d33d365efbeb9ae7266908b5dcf98cdece # v1.3.0
+      - uses: grafana/run-k6-action@54385d2a25c222a08b4a3aec6b653b8fb370a1ed # v1.6.0
+        env:
+          BACKEND_URL: https://${{ github.event.repository.name }}-test.apps.silver.devops.gov.bc.ca/api
+          FRONTEND_URL: https://${{ github.event.repository.name }}-test.apps.silver.devops.gov.bc.ca
+        with:
+          path: ./common/tests/load/${{ matrix.name }}-test.js
+          flags: --vus 100 --duration 300s
+
+  results:
+    name: Scheduled Results
+    needs: [stale-branches, ageOutPRs, schema-spy, zap, load-tests]
+    if: always()
+    runs-on: ubuntu-slim
+    timeout-minutes: 1
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: bcgov/actions/workflow-results@d209bb08aabe15e5e69aca53b24d338a7b2843d5 # v0.12.0
+        with:
+          needs: ${{ toJson(needs) }}
+          title: Scheduled Results
