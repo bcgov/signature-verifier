@@ -2,9 +2,7 @@ import { check } from "k6";
 import http from "k6/http";
 import { Rate } from "k6/metrics";
 
-
 export let errorRate = new Rate("errors");
-
 
 function checkStatus(response, checkName, statusCode = 200) {
   let success = check(response, {
@@ -20,15 +18,8 @@ function checkStatus(response, checkName, statusCode = 200) {
   errorRate.add(!success, { tag1: checkName });
 }
 
-
 export default function() {
-  let url = `${__ENV.BACKEND_URL}/v1/users`;
-  let params = {
-    headers: {
-      "Content-Type": "application/json"
-    }
-  };
-  let res = http.get(url, params);
-  checkStatus(res, "get-all-users", 200);
-
+  let url = `${__ENV.BACKEND_URL}/health`;
+  let res = http.get(url);
+  checkStatus(res, "health-check", 200);
 }

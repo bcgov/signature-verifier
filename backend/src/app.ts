@@ -8,9 +8,9 @@ import { VersioningType } from '@nestjs/common'
 import { metricsMiddleware } from './middleware/prom'
 
 /**
- *
+ * Bootstrap the stateless NestJS API application.
  */
-export async function bootstrap() {
+export async function bootstrap(): Promise<NestExpressApplication> {
   const app: NestExpressApplication = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: customLogger,
   })
@@ -25,10 +25,9 @@ export async function bootstrap() {
     prefix: 'v',
   })
   const config = new DocumentBuilder()
-    .setTitle('Users example')
-    .setDescription('The user API description')
+    .setTitle('Signature Verifier API')
+    .setDescription('Standards-based digital signature verification API')
     .setVersion('1.0')
-    .addTag('users')
     .build()
 
   const document = SwaggerModule.createDocument(app, config)

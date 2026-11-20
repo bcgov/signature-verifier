@@ -6,7 +6,7 @@ parameters:
     required: true
   - name: COMPONENT
     description: Component name
-    value: frontend
+    value: dss
   - name: ZONE
     description: Deployment zone, e.g. pr-### or prod
     required: true
@@ -19,8 +19,6 @@ parameters:
   - name: ORG_NAME
     description: Organization name
     value: bcgov
-  - name: DOMAIN
-    value: apps.silver.devops.gov.bc.ca
   - name: MIN_REPLICAS
     description: The minimum amount of replicas for the horizontal pod autoscaler.
     value: "2"
@@ -28,15 +26,15 @@ parameters:
     description: The maximum amount of replicas for the horizontal pod autoscaler.
     value: "5"
   - name: CPU_REQUEST
-    value: "50m"
+    value: "100m"
   - name: MEMORY_REQUEST
-    value: "50Mi"
+    value: "512Mi"
   - name: MEMORY_LIMIT
     description: Memory limit for the container (bounds the pod's working set).
-    value: "1Gi"
-  - name: LOG_LEVEL
-    description: Caddy log level (debug|info|warn|error)
-    value: "info"
+    value: "2Gi"
+  - name: JAVA_OPTS
+    description: JVM heap options for EU DSS Tomcat runtime.
+    value: "-Xms512m -Xmx1536m"
 objects:
   - apiVersion: apps/v1
     kind: Deployment
@@ -58,10 +56,6 @@ objects:
           labels:
             app: ${NAME}-${ZONE}
             deployment: ${NAME}-${ZONE}-${COMPONENT}
-          annotations:
-            prometheus.io/scrape: 'true'
-            prometheus.io/port: '3003'
-            prometheus.io/path: '/metrics'
         spec:
           terminationGracePeriodSeconds: 30
           affinity:
@@ -73,61 +67,16 @@ objects:
                       matchLabels:
                         deployment: ${NAME}-${ZONE}-${COMPONENT}
                     topologyKey: kubernetes.io/hostname
-          initContainers:
-            - name: wait-for-backend
-              image: ${REGISTRY}/${ORG_NAME}/${NAME}/${COMPONENT}:${IMAGE_TAG}
-              command:
-                - /bin/sh
-                - -c
-                - |
-                  echo "Waiting for backend to be healthy..."
-                  max_retries=30
-                  attempt=1
-                  until wget -q --spider http://${NAME}-${ZONE}-backend/api/health; do
-                    if [ "$attempt" -ge "$max_retries" ]; then
-                      echo "ERROR: Backend ${NAME}-${ZONE}-backend is not reachable/healthy after ${max_retries} attempts." >&2
-                      exit 1
-                    fi
-                    echo "Backend not ready (attempt ${attempt}/${max_retries}), sleeping..."
-                    attempt=$((attempt + 1))
-                    sleep 2
-                  done
-                  echo "Backend is UP and healthy!"
-              securityContext:
-                allowPrivilegeEscalation: false
-                runAsNonRoot: true
-                readOnlyRootFilesystem: true
-                capabilities:
-                  drop: ["ALL"]
-                seccompProfile:
-                  type: RuntimeDefault
-              volumeMounts:
-                - name: caddy-data
-                  mountPath: /tmp/caddy
           containers:
-            - name: ${NAME}
+            - name: ${NAME}-${COMPONENT}
               image: ${REGISTRY}/${ORG_NAME}/${NAME}/${COMPONENT}:${IMAGE_TAG}
               imagePullPolicy: Always
               ports:
                 - name: http
-                  containerPort: 3000
-                - name: health
-                  containerPort: 3001
+                  containerPort: 8080
               env:
-                - name: LOG_LEVEL
-                  value: ${LOG_LEVEL}
-                - name: BACKEND_URL
-                  value: http://${NAME}-${ZONE}-backend
-                # readOnlyRootFilesystem: true → redirect every writable path
-                # onto an emptyDir. Caddy stores config/data under the XDG dirs
-                # (mounted at /tmp/caddy); Coraza writes SecTmpDir/SecDataDir
-                # under /tmp/coraza; generic temp files go to TMPDIR.
-                - name: XDG_CONFIG_HOME
-                  value: /tmp/caddy
-                - name: XDG_DATA_HOME
-                  value: /tmp/caddy
-                - name: TMPDIR
-                  value: /tmp/caddy
+                - name: JAVA_OPTS
+                  value: ${JAVA_OPTS}
               resources:
                 requests:
                   cpu: ${CPU_REQUEST}
@@ -143,10 +92,16 @@ objects:
                 seccompProfile:
                   type: RuntimeDefault
               volumeMounts:
-                - name: caddy-data
-                  mountPath: /tmp/caddy
-                - name: coraza-tmp
-                  mountPath: /tmp/coraza
+                - name: tmp
+                  mountPath: /tmp
+                - name: tomcat-temp
+                  mountPath: /usr/local/tomcat/temp
+                - name: tomcat-work
+                  mountPath: /usr/local/tomcat/work
+                - name: tomcat-logs
+                  mountPath: /usr/local/tomcat/logs
+                - name: tomcat-catalina
+                  mountPath: /usr/local/tomcat/conf/Catalina
               startupProbe:
                 httpGet:
                   path: /
@@ -161,8 +116,8 @@ objects:
                 failureThreshold: 3
               livenessProbe:
                 httpGet:
-                  path: /health
-                  port: health
+                  path: /
+                  port: http
                 periodSeconds: 10
                 failureThreshold: 3
               lifecycle:
@@ -170,14 +125,23 @@ objects:
                   exec:
                     command: ["/bin/sleep", "10"]
           volumes:
-            - name: caddy-data
+            - name: tmp
               emptyDir:
                 medium: Memory
                 sizeLimit: 256Mi
-            - name: coraza-tmp
+            - name: tomcat-temp
               emptyDir:
                 medium: Memory
                 sizeLimit: 256Mi
+            - name: tomcat-work
+              emptyDir:
+                sizeLimit: 128Mi
+            - name: tomcat-logs
+              emptyDir:
+                sizeLimit: 128Mi
+            - name: tomcat-catalina
+              emptyDir:
+                sizeLimit: 16Mi
   - apiVersion: v1
     kind: Service
     metadata:
@@ -188,27 +152,9 @@ objects:
       ports:
         - name: http
           port: 80
-          targetPort: 3000
+          targetPort: 8080
       selector:
         deployment: ${NAME}-${ZONE}-${COMPONENT}
-  - apiVersion: route.openshift.io/v1
-    kind: Route
-    metadata:
-      annotations:
-        # Router sticky cookie defaults to SameSite=None (ZAP 10054).
-        router.openshift.io/cookie-same-site: Lax
-      labels:
-        app: ${NAME}-${ZONE}
-      name: ${NAME}-${ZONE}-${COMPONENT}
-    spec:
-      host: ${NAME}-${ZONE}.${DOMAIN}
-      to:
-        kind: Service
-        name: ${NAME}-${ZONE}-${COMPONENT}
-        weight: 100
-      tls:
-        termination: edge
-        insecureEdgeTerminationPolicy: Redirect
   - apiVersion: autoscaling/v2
     kind: HorizontalPodAutoscaler
     metadata:
