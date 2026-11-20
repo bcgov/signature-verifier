@@ -1,617 +1,130 @@
-[![MIT License](https://img.shields.io/github/license/bcgov/quickstart-openshift.svg)](/LICENSE)
-[![Merge](https://github.com/bcgov/quickstart-openshift/actions/workflows/merge.yml/badge.svg)](https://github.com/bcgov/quickstart-openshift/actions/workflows/merge.yml)
-[![Analysis](https://github.com/bcgov/quickstart-openshift/actions/workflows/analysis.yml/badge.svg)](https://github.com/bcgov/quickstart-openshift/actions/workflows/analysis.yml)
-[![Scheduled](https://github.com/bcgov/quickstart-openshift/actions/workflows/scheduled.yml/badge.svg)](https://github.com/bcgov/quickstart-openshift/actions/workflows/scheduled.yml)
-
-# QuickStart for OpenShift
-
-## Pull Request-Based Workflows with Sample Stack
-
-This repository provides a template to rapidly deploy a modern web application stack to OpenShift using [GitHub Actions](https://github.com/bcgov/quickstart-openshift/actions), incorporating best practices for CI/CD, security, and observability. By hitting the ground running we can save weeks‑to‑months of development time, receive regular updates, and built‑in **Maintenance Mode Automation**, which allows an app to go on autopilot for security and dependency updates.  This limits developmer involvement to critical issues only, drastically reducing labor costs and freeing up resources for higher priority work.
-
-**Includes:**
-* Pull Request-based pipeline
-* Sandboxed development environments
-* Container publishing (ghcr.io) and importing (OpenShift)
-* Security, vulnerability, infrastructure, and container scan tools
-* Out-of-the-box alignment with **OWASP ASVS** Level 1 & 2 controls (see [SECURITY.md](./SECURITY.md#owasp-asvs-alignment))
-* Automatic dependency patching via [bcgov/renovate-config](https://github.com/bcgov/renovate-config)
-* Maintenance Mode Automation (hands‑off updates, low‑dev mode) via the same Renovate config
-* Enforced code reviews and workflow jobs (pass|fail)
-* OpenShift Templates
-* Prometheus Metrics export from Backend/Frontend
-* Resource Tuning with Horizontal Pod Autoscaler
-* Affinity and anti-affinity for Scheduling on different worker nodes
-* Rolling updates with zero downtime in PROD
-* Database Migrations with Flyway
-* Pod disruption budgets for high availability
-* Self-healing through probes/checks (startup, readiness, liveness)
-* **Sample application stack:**
-    * Database: Postgres, Flyway
-    * Frontend: TypeScript, React, Caddy Server with Coraza WAF (prefers native `fetch` over Axios)
-    * Backend: TypeScript, Nest.js
-
-
-# Setup
-
-Setup takes an hour or less.  Scripts in [`scripts/`](./scripts/) do the GitHub and OpenShift parts.  Each one previews its changes by default, makes them only with `--apply`, and is safe to re-run: it changes only what differs and leaves everything else alone.  Running any of them without `--apply` verifies the setup: it ends with `All set: nothing to change.`, or exits non-zero with the number of things to change.  It confirms secrets exist but can't verify their values.  Run them yourself, with your own logins.
-
-## Checklist
-
-1. **Accounts** (by hand): [GitHub accounts](https://github.com/signup) for the team.  For BC Government, also IDIR accounts and membership in the bcgov GitHub organization ([instructions](https://developer.gov.bc.ca/docs/default/component/bc-developer-guide/use-github-in-bcgov/bc-government-organizations-in-github/#directions-to-sign-up-and-link-your-account-for-bcgov)).
-2. **OpenShift namespaces** (by hand): request a project set (DEV, TEST and PROD) from Platform Services at the [registry](https://registry.developer.gov.bc.ca).  You get a licence plate, e.g. `abc123`, and namespaces `abc123-dev`, `abc123-test` and `abc123-prod`.
-3. **Create the repository** (by hand): use this repository as a template, with `bcgov/quickstart-openshift` selected under Repository template.
-
-    ![](./.github/graphics/template.png)
-
-4. **Log in** (by hand): `gh auth login`, then in the OpenShift console select your name (top right) > `Copy login command` and paste it into a shell (`oc login --token=... --server=...`).  You need admin rights on the repo and edit rights in all three namespaces.
-    Then run steps 5 to 7 with one command, which previews by default and exits non-zero if anything needs changing; add `--apply` to make the changes:
-    ```bash
-    scripts/setup.sh --plate abc123   # preview, then add --apply
-    ```
-5. **OpenShift deploy account** (optional helper; see [by hand](#secrets-and-variables-by-hand)): creates the `github-actions` service account, `edit` role binding and token Secret in each namespace.
-    ```bash
-    scripts/setup-openshift.sh --plate abc123          # preview, then add --apply
-    ```
-6. **GitHub environments, secrets and variables** (optional helper; see [by hand](#secrets-and-variables-by-hand)): creates the `test` and `prod` environments, and sets the `OC_NAMESPACE` variable and `OC_TOKEN` and `DB_PASSWORD` secrets for pull requests (repository level), TEST and PROD, plus the `OC_SERVER` variable.  Without `--plate` it reads the plate from existing `OC_NAMESPACE` variables.  It won't generate a `DB_PASSWORD` for a namespace that already has a database, since a new password would lock the app out.  Secrets that are already set are never overwritten.  Secret values are piped from `oc` or `openssl` straight into `gh secret set`; they're never printed or written to disk, and previews show only the secret's name.
-    ```bash
-    scripts/setup-environments.sh --plate abc123   # preview, then add --apply
-    ```
-7. **GitHub repository settings**: the `main` ruleset, pull request settings and private vulnerability reporting (see [Repository Configuration](#repository-configuration)).
-    ```bash
-    scripts/setup-github.sh                              # preview, then add --apply
-    ```
-8. **First pull request**: open one to run the pipeline, then make the packages public (see [Packages](#packages)).
-9. **Optional** (by hand): [SonarCloud](#code-quality-with-sonarcloud), [Renovate](#renovate), Sysdig, a vanity URL with TLS, PROD deployment rules and team members, all described below.
-
-## Secrets, Variables and Environments
-
-Workflows read these values.  Repository-level values are used by pull request deploys; `test` and `prod` environment values override them for those deploys.  Steps 5 and 6 set the required ones.
-
-| Environment | Name                   | Description                                     |
-|-------------|------------------------|-------------------------------------------------|
-| none        | `vars.OC_SERVER`       | OpenShift API server URL (repository-level)     |
-| none        | `vars.OC_NAMESPACE`    | PR namespace, `<plate>-dev`                     |
-| none        | `secrets.OC_TOKEN`     | PR service token                                |
-| none        | `secrets.DB_PASSWORD`  | PR database password                            |
-| test        | `vars.OC_NAMESPACE`    | TEST namespace, `<plate>-test`                  |
-| test        | `secrets.OC_TOKEN`     | TEST service token                              |
-| test        | `secrets.DB_PASSWORD`  | TEST database password                          |
-| prod        | `vars.OC_NAMESPACE`    | PROD namespace, `<plate>-prod`                  |
-| prod        | `secrets.OC_TOKEN`     | PROD service token                              |
-| prod        | `secrets.DB_PASSWORD`  | PROD database password                          |
-| none (opt)  | `vars.ROUTE_HOST`      | Vanity URL hostname (repository-level)          |
-| prod (opt)  | `vars.S3_BUCKET`       | S3 bucket name for offsite database backups     |
-| prod (opt)  | `vars.S3_ENDPOINT`     | S3 endpoint URL (e.g. `https://nrs.objectstore.gov.bc.ca`) |
-| prod (opt)  | `secrets.S3_USER`      | S3 access key ID for offsite database backups   |
-| prod (opt)  | `secrets.S3_PASSWORD`  | S3 secret access key for offsite database backups |
-| none (opt)  | `secrets.SONAR_TOKEN_BACKEND`, `secrets.SONAR_TOKEN_FRONTEND` | See [SonarCloud](#code-quality-with-sonarcloud) |
-| none (opt)  | `secrets.SYSDIG_API_TOKEN` | PROD alert sync                             |
-
-`DB_PASSWORD` is generated separately for each environment.  Don't change it after the first deploy: PostgreSQL keeps its first password.
-
-**Copied the template before `OC_NAMESPACE` became a variable?**  Move it: `gh variable set OC_NAMESPACE --body <plate>-dev`, and the same with `--env test` / `--env prod` (or run `scripts/setup-environments.sh --apply`).  The old secret is unused and can be deleted.
-
-### Secrets and Variables by Hand
-
-Steps 5 and 6 above are an optional helper.  Everything they do can be done by hand, as below.
-
-Variables and secrets are consumed by workflows.  Variables are visible in workflows and logs, while secrets are hidden/redacted.
-
-**Repository-level vs Environment-specific:**
+[![MIT License](https://img.shields.io/github/license/bcgov/signature-verifier.svg)](/LICENSE)
+[![Merge](https://github.com/bcgov/signature-verifier/actions/workflows/merge.yml/badge.svg)](https://github.com/bcgov/signature-verifier/actions/workflows/merge.yml)
+[![Analysis](https://github.com/bcgov/signature-verifier/actions/workflows/analysis.yml/badge.svg)](https://github.com/bcgov/signature-verifier/actions/workflows/analysis.yml)
+[![Scheduled](https://github.com/bcgov/signature-verifier/actions/workflows/scheduled.yml/badge.svg)](https://github.com/bcgov/signature-verifier/actions/workflows/scheduled.yml)
 
-- **Repository-level** (shown as `<none>` in the environment column): These are available to all workflows and environments. They're created at the repository level and apply globally unless overridden by environment-specific values.
-- **Environment-specific**: These are scoped to a particular environment (e.g., TEST, PROD) and override repository-level values when that environment is used.
+# Signature Verifier
 
-To create new secrets from GitHub.com click:
+Shared, stateless digital signature verification service on OpenShift for BC Government applications.
 
-* `Settings > Secrets and Variables > Actions > Secrets > New repository secret`
+## Scope
 
-To create new environments from GitHub.com click:
+- **Verification only:** Validates incoming cryptographically signed documents in memory and returns structured signature/certificate metadata. Uploaded files and PII are never persisted.
+- **Not a signing service:** This service does not issue certificates or apply signatures.
+  - Regulated professionals (e.g., EGBC, AIBC, FPBC) still require their own Portage CyberTech / Notarius `CertifiO` credential (or manual authentication) to sign documents.
+  - General non-regulated e-signatures in BC Gov use existing options such as OneSpan, CHEFS, or OCIO DCS.
 
-* `Settings > Environments > New environment`
+## Architecture
 
-**`OC_TOKEN`**
-
-Create separate tokens for each of the DEV, TEST and PROD namespaces.
-
-1. Login to your OpenShift console, e.g. [Silver](https://console.apps.silver.devops.gov.bc.ca/) or [Gold](https://console.apps.gold.devops.gov.bc.ca/).
-1. Select the pulldown with your username in the top right corner.
-1. Select `Copy login command`.
-1. Follow the UI to access a one-time login with token.
-1. Paste the login command into a shell, e.g.:
-    ```
-    oc login --token=... --server=...
-    ```
-1. View available projects:
-    ```
-    oc projects
-    ```
-1. Switch to a namespace:
-    ```
-    oc project <abc123-name>
-    ```
-1. Create a service account:
-    ```
-    oc create sa github-actions
-    ```
-1. Create a role binding:
-    ```
-    oc create rolebinding github-actions-edit --clusterrole=edit --serviceaccount=$(oc project -q):github-actions
-    ```
-1. Create and copy a token.  It cannot be retrieved again:
-    ```
-    oc create token github-actions --duration=87600h
-    ```
-1. Save it as the `OC_TOKEN` secret: repository level for `<plate>-dev` (pull requests), or in the `test` / `prod` environment for those namespaces.  To pipe it straight in without printing it:
-    ```
-    oc create token github-actions --duration=87600h | gh secret set OC_TOKEN   # add --env test or --env prod for those namespaces
-    ```
+- **`backend/` (NestJS / TypeScript):** Stateless HTTP facade exposed via OpenShift `Route`. Accepts `multipart/form-data` uploads, evaluates results against configured trust profiles, and exposes `/api/health`, `/api/metrics`, and Swagger docs at `/api/docs`.
+- **`dss/` (EU DSS `6.5.1`):** Upstream [`esig/dss-demonstrations`](https://github.com/esig/dss-demonstrations) (`dss-demo-webapp`) Tomcat WAR configured with Portage/Notarius Root CAs (`cron.tl.loader.enable = false`). Deployed as an internal `ClusterIP`-only Service (`NetworkPolicy` restricts ingress solely to `backend` pods; runs as non-root `USER 10001` with `readOnlyRootFilesystem: true`).
 
-* Alternate steps using an inline template can be found [here](https://github.com/bcgov/gh-discussions-lab/discussions/3750).  `scripts/setup-openshift.sh` uses the same approach: a `github-actions-token` Secret of type `kubernetes.io/service-account-token`, which doesn't expire.
-* In earlier versions of OpenShift, a pipeline token secret was created automatically in each namespace.
-* Reference: `${{ secrets.OC_TOKEN }}`
+## Live Environments
 
-**`OC_NAMESPACE`**
+- **TEST:** `https://signature-verifier-test.apps.silver.devops.gov.bc.ca/api` ([Swagger](https://signature-verifier-test.apps.silver.devops.gov.bc.ca/api/docs))
+- **PROD:** `https://signature-verifier-prod.apps.silver.devops.gov.bc.ca/api` ([Swagger](https://signature-verifier-prod.apps.silver.devops.gov.bc.ca/api/docs))
 
-Teams will receive a set of project namespaces, usually DEV (for PRs), TEST and PROD.  TOOLS namespaces (e.g. Jenkins, shared Oracle resources) are not used here.  Provided by your OpenShift platform team.
+## API Contract (`POST /api/v1/validate`)
 
-* Reference: `${{ vars.OC_NAMESPACE }}`
-* E.g.: `abc123-dev`
-* Set it with `gh variable set OC_NAMESPACE --body abc123-dev` (repository level, for pull requests), and `--env test` / `--env prod` with `abc123-test` / `abc123-prod`.
+### Request
 
-**`OC_SERVER`**
+Upload a document as `multipart/form-data` with field name `file` (up to `50 MiB`) and optional `profile` query parameter (`portage-notarius` default, or `default`):
 
-OpenShift API server URL for your cluster.  One repository-level variable, shared by pull requests, TEST and PROD (not set per environment).
+```bash
+curl -sS \
+  -F "file=@sealed-drawing.pdf" \
+  "https://signature-verifier-test.apps.silver.devops.gov.bc.ca/api/v1/validate?profile=portage-notarius"
+```
 
-* Reference: `${{ vars.OC_SERVER }}`
-* Silver: `https://api.silver.devops.gov.bc.ca:6443`
-* Gold: `https://api.gold.devops.gov.bc.ca:6443`
-* Set it once at repository level, while logged in to the right cluster: `gh variable set OC_SERVER --body "$(oc whoami --show-server)"`
+### Response Status Codes
 
-**`DB_PASSWORD`**
+| HTTP Status | Meaning |
+| :--- | :--- |
+| `200 OK` | Validation completed; check JSON `status` (`valid`, `unsigned`, `unapproved_org`, `invalid`) |
+| `400 Bad Request` | Missing/empty `file` field or unknown `profile` |
+| `502 Bad Gateway` | Upstream `dss` validation engine unreachable or returned an error |
 
-The password used for the PostgreSQL database. This **MUST** be a strong, unique password and **DISTINCT** across all environments (pr, test, prod). Reusing the same password in development/PRs as in production is a critical security risk.
+### Example `200 OK` Response
 
-* Reference: `${{ secrets.DB_PASSWORD }}`
-* Minimum 12 characters recommended for production.
-* **Pro-tip**: Use a password manager (like BitWarden, 1Password, or KeePass) to generate and store long, random, and unique passwords for each environment. Avoid simple, guessable passwords like `password` or `secure`.
-
-### Optional Values
-
-Set these by hand with `gh secret set` / `gh variable set` when you need them.
-
-**`SYSDIG_API_TOKEN`**
-
-Sysdig API token used to sync the PROD email-alert set on every merge. Sourced from the in-cluster Secret materialized by your `SysdigTeam` CR (BC Gov platform-services provisions this in your `*-tools` namespace). Optional — if unset, the `monitor-prod` step no-ops with a warning, so the deploy still succeeds.
-
-* Reference: `${{ secrets.SYSDIG_API_TOKEN }}`
-* Alert templates live in [`monitoring/alerts/`](./monitoring/alerts/). Add or remove files to customize the alert set per app — see [`bcgov/action-sysdig-monitor`](https://github.com/bcgov/action-sysdig-monitor) for the template schema and placeholder vocabulary.
-
-**`ROUTE_HOST` (vanity URL certificate)**
-
-Vanity URL hostname for the application (e.g., `myapp.gov.bc.ca`, hostname only, no scheme). Optional repository variable. While it is unset, the standalone `Cert Keeper` workflow ([`cert-keeper.yml`](./.github/workflows/cert-keeper.yml)) does nothing.
-
-* Reference: `${{ vars.ROUTE_HOST }}`
-* Set it as a repository variable: `gh variable set ROUTE_HOST --body 'myapp.gov.bc.ca'`. The workflow reads `ROUTE_HOST` at job level, so it must be a repository variable, not an environment one.
-* Once `ROUTE_HOST` is set, `Cert Keeper` runs daily and by hand. It reads the certificate the host serves. If the host has no valid certificate, or a third or less of its life is left, it gets a free [Let's Encrypt](https://letsencrypt.org/) certificate and installs it on the PROD vanity Route (`<repository>-vanity-url`). Otherwise it stops. If a run fails, it opens an issue and notifies CODEOWNERS.
-* It uses the `prod` environment's `OC_NAMESPACE` and `OC_TOKEN` and the repository's `OC_SERVER`, so no certificate files or private keys are stored in GitHub. Configure the `prod` environment's deployment branches and tags (e.g. `main` or release tags) so a pull-request job cannot request its secrets.
-* Before you set `ROUTE_HOST`: the hostname's DNS must already point at the cluster router, and port 80 must reach it, because Let's Encrypt checks ownership over plain HTTP. Let's Encrypt limits a hostname to 5 certificates a week, so avoid repeated forced runs. See the [cert-keeper README](https://github.com/bcgov/actions-openshift/blob/main/cert-keeper/README.md) for limits, staging rehearsals and common fixes.
-* Run it by hand from `Actions > Cert Keeper > Run workflow`, or `gh workflow run cert-keeper.yml`.
-
-**`S3_BUCKET`, `S3_ENDPOINT`, `S3_USER`, `S3_PASSWORD` (Automated Offsite Backups)**
-
-Configures automated daily disaster-recovery database backups pushed to an offsite S3 / ObjectStore bucket (e.g. BC Gov ObjectStore or AWS S3).
-* References: `${{ vars.S3_BUCKET }}`, `${{ vars.S3_ENDPOINT }}`, `${{ secrets.S3_USER }}`, `${{ secrets.S3_PASSWORD }}`
-* Backups are configured for PROD only. They deploy via `common/openshift.backup.yml` as a Kubernetes `batch/v1` `CronJob` along with a restore CronJob and backup configuration Secret. They run on an ephemeral `emptyDir: {}` scratch volume (zero PVC quota footprint) and run nightly in PROD (logging a helpful skip notice if `vars.S3_BUCKET` is not yet configured).
-* To enable offsite backups in PROD:
-  ```bash
-  gh variable set S3_BUCKET --env prod --body "my-backup-bucket"
-  gh variable set S3_ENDPOINT --env prod --body "https://nrs.objectstore.gov.bc.ca"  # Optional for AWS S3
-  gh secret set S3_USER --env prod                                                 # Prompts for Access Key ID
-  gh secret set S3_PASSWORD --env prod                                             # Prompts for Secret Access Key
-  ```
-* **Restore**: The restore CronJob is included in `common/openshift.backup.yml` and deployed dormant (scheduled for Feb 31st). To restore a backup on-demand in OpenShift:
-  ```bash
-  oc create job --from=cronjob/<app>-<zone>-database-restore restore-manual -n <namespace>
-  ```
-
-### PROD Deployment Branches and Tags (optional)
-
-By default, an environment allows deployments from any branch or tag ("No restriction"). To make sure only trusted branches or release tags can deploy and read production secrets, configure deployment restrictions:
-
-1. Select `Settings > Environments > prod`
-2. Under **Deployment branches and tags**, change the dropdown to **Selected branches and tags**
-3. Click **Add deployment branch or tag rule**:
-    * To gate by branch: select **Branch** and enter `main` (or your protected release branch).
-    * To gate by release tag: select **Tag** and enter a pattern like `v*.*.*` or `v*` so only release tags can trigger deployment.
-
-## Releases (optional)
-
-Two workflows can deploy PROD, and both are active by default:
-
-* `merge.yml` deploys every merge to TEST, runs the tests, then deploys PROD by PR number.
-* `release.yml` deploys a published [GitHub release](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) to PROD. It finds the PR that the release's commit came from and deploys that PR's images, the same ones `merge.yml` deployed. Nothing is rebuilt.
-
-To make PROD release-only, comment out the `deploy-prod`, `monitor-prod` and `promote` jobs in `merge.yml`. Merges then go to TEST and stop, and PROD changes only when you publish a release.
-
-Notes:
-
-* Publish releases from a commit on `main` that was merged from a PR. Commits pushed straight to `main` have no PR images to deploy.
-* If the `prod` environment limits deployment branches and tags, add a tag rule for your release tags (e.g. `v*`), or releases can't deploy.
-* Both workflows share a concurrency group, so they never deploy PROD at the same time.
-
-### Why release-to-prod
-
-* **Release a passing commit.** Every merge deploys to TEST and runs the tests there. Publish a release from a commit whose `Merge` run passed, and `release.yml` deploys it to PROD.
-* **PROD gets the tested images.** PROD runs the same images TEST ran, and `release.yml` logs their digests; nothing is rebuilt. Google's SRE book describes builds that are reproducible and releases cut from the last revision that passed all tests ([Release Engineering](https://sre.google/sre-book/release-engineering/)).
-* **Review on the PR, automation after.** Changes are reviewed on the PR and checked by automated tests, and publishing a release is the decision to ship. DORA's research finds that peer review during development, supported by automated tests and monitoring that catch bad changes early, works best ([DORA capability guide](https://dora.dev/capabilities/streamlining-change-approval/)).
-* **The `prod` environment holds PROD secrets and deploy rules.** Only jobs that reference the environment can read its secrets, and its deployment branch and tag rules choose what may deploy ([Deployments and environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)).
-* **Smoke check, then roll back fast.** Add a smoke check against PROD after deploys to catch what TEST can't. If a release misbehaves, re-run the `Release` workflow for the previous release; it redeploys that release's images without a rebuild. GitHub allows re-runs [up to 30 days after the initial run](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs); for an older release, publish a new release whose tag targets the previous release's commit, which deploys that commit's PR images.
-
-## Updating Dependencies
-
-Dependabot and Mend Renovate can both provide dependency updates using pull requests.  Dependabot is simpler to configure, while Renovate is much more configurable and lighter on resources.
-
-### Renovate
-
-A configuration file (`renovate.json`) is included with this template that sources configuration from our [renovate repository](https://github.com/bcgov/renovate-config).
-
-> [!TIP]
-> Once Renovate is set up, you can enable **Maintenance Mode Automation** by following the checklist in the [Maintenance Mode Automation](#maintenance-mode-automation) section of this README. This will let Renovate auto‑merge safe updates after all CI checks pass.
-
-BC Government employees can request having the Renovate and Renovate Approve GitHub Apps installed on their repository through the [CITZ Service Desk](https://citz-do.atlassian.net/servicedesk/customer/portal/2/group/9/create/10). Most others can add their repositories directly from the [Renovate](https://github.com/apps/renovate) and [Renovate Approve](https://github.com/apps/renovate-approve) GitHub Apps.
-
-### Dependabot
-
-Dependabot is no longer recommended as an alternative to Renovate for generating security, vulnerability and dependency pull requests.  It can still be used to generate warnings under the GitHub Security tab, which is only viewable by repository administrators.
-
-## Code Quality with SonarCloud
-
-SonarCloud performs static code analysis, test coverage tracking, and quality gate checks via the `bcgov/actions/test-and-analyse` action in [`.github/workflows/analysis.yml`](./.github/workflows/analysis.yml). SonarCloud integration is optional—the test suites and CI pipeline run successfully without it.
-
-BC Government employees can request SonarCloud projects via [devops-requests](https://github.com/bcgov/devops-requests/issues/new/choose) (select **Request for import GitHub repository on SonarCloud**) or directly through the [CITZ Service Desk](https://citz-do.atlassian.net/servicedesk/customer/portal/2/group/9/create/594).
-
-### Onboarding Steps
-
-Before submitting the request, ensure the designated project administrator has logged in to the [SonarCloud console under bcgov-sonarcloud](https://sonarcloud.io/organizations/bcgov-sonarcloud/projects) using their GitHub account.
-
-Fill out the intake form using the following selections:
-
-| Field | Selection | Notes |
-| --- | --- | --- |
-| **GitHub username** | `<admin-username>` | Must be the user who logged into SonarCloud above; will be assigned project administrator. |
-| **GitHub Repo URL** | `https://github.com/bcgov/<repo>` | Full repository URL. |
-| **New Code Definition** | **Previous version** | Quality gates evaluate changes relative to previous releases rather than a rolling day count. |
-| **Setup as a monorepo** | **Yes** | Quickstart repositories contain both `backend` and `frontend`. |
-| **Additional Comments** | `backend, frontend` | Explicitly list component names so separate SonarCloud sub-projects are created. |
-
-### Post-Provisioning Configuration
-
-Once the platform team provisions the projects, two separate SonarCloud projects are created (one for `backend` and one for `frontend`):
-1. Generate analysis tokens in SonarCloud for both projects and save them as repository secrets: `SONAR_TOKEN_BACKEND` and `SONAR_TOKEN_FRONTEND`. Both tokens are required; this repository does not use a single shared `SONAR_TOKEN`.
-2. Update `-Dsonar.projectKey` in [`.github/workflows/analysis.yml`](./.github/workflows/analysis.yml) for both jobs to match your repository (e.g. `<repo>_backend` and `<repo>_frontend` instead of `quickstart-openshift_*`).
-
-## Dependency Scanning with Knip
-
-This repository uses [Knip](https://knip.dev/) for dependency scanning to identify unused dependencies and exports. Knip runs automatically as part of the Analysis workflow via the `bcgov/actions/test-and-analyse` action.
-
-**Note:** Knip runs in **warning mode** by default (non-blocking). Forks can add `unused_deps: error` to make it blocking.
-
-### Handling Unused Dependencies
-
-When Knip identifies unused dependencies, you have two options:
-
-1. **Remove the dependency** - If it's truly unused, remove it from `package.json`
-2. **Report as false positive** - If the dependency is used but not detected by static analysis
-
-### Reporting False Positives
-
-**Do not create team-specific `knip.config.ts` files.** All Knip configuration is managed centrally in the upstream action repository.
-
-If you encounter a false positive (a dependency that is used but flagged as unused), report it upstream:
-
-1. **Verify it's a false positive** by checking:
-   - Is it exported from a utility file (e.g., `test-utils.tsx`)?
-   - Is it used via dynamic imports?
-   - Is it required by build tools or other dependencies?
-   - Is it used in configuration files that Knip doesn't analyze?
-
-2. **Open a PR to the upstream repository:**
-   - Repository: [`bcgov/actions`](https://github.com/bcgov/actions)
-   - File: `test-and-analyse/.knip.json`
-   - Add the dependency to the `ignoreDependencies` array
-
-3. **Include justification** in your PR:
-   - Why it's a false positive
-   - How the dependency is used
-   - Example: "Exported from test-utils files for use in tests but may not be directly imported yet. Common pattern in testing utilities."
-
-### Example: Reporting a False Positive
-
-If `@testing-library/user-event` is flagged but exported from `test-utils.tsx`:
-
-**Upstream PR to `bcgov/actions/test-and-analyse/.knip.json`:**
 ```json
 {
-  "ignoreDependencies": [
-    "swagger-ui-express",
-    "rimraf",
-    "@types/node",
-    "@types/react",
-    "@types/react-dom",
-    "@testing-library/user-event"
-  ],
-  "ignoreBinaries": [
-    "rimraf"
+  "status": "valid",
+  "profile": "portage-notarius",
+  "documentName": "sealed-drawing.pdf",
+  "signaturesCount": 1,
+  "validSignaturesCount": 1,
+  "approvedSignaturesCount": 1,
+  "signatures": [
+    {
+      "id": "S-F6234579BCF5F9FAA81E06291C3E31FE027D9B94EFEB3B10A18AA873D783CC47",
+      "valid": true,
+      "signedBy": "Signer Name -- P. Eng. - EGBC",
+      "subjectName": "UID=41368+CN=Signer Name -- P. Eng. - EGBC,OU=EGBC - Engineers and Geoscientists of British Columbia,O=CertifiO Pro,C=CA",
+      "approvedOrg": "EGBC",
+      "indication": "TOTAL_PASSED",
+      "subIndication": null,
+      "format": "PAdES-BASELINE-T",
+      "signingTime": "2024-06-12T23:22:43Z",
+      "bestSignatureTime": "2024-06-12T23:22:44Z",
+      "timestampTime": "2024-06-12T23:22:44Z",
+      "historicalLtv": true,
+      "errors": [],
+      "warnings": [
+        "Validated at trusted TSA timestamp 2024-06-12T23:22:44Z (signing or OCSP certificate expired without archival B-LTA timestamp)"
+      ]
+    }
   ]
 }
 ```
 
-**PR Description:**
-> Add `@testing-library/user-event` to ignoreDependencies
-> 
-> This dependency is exported from test-utils files for use in tests but may not be directly imported yet. This is a common pattern in testing utilities where dependencies are re-exported for convenience.
+### Sample Consumer Call (Node `fetch`)
 
-### Common False Positive Patterns
+```ts
+const form = new FormData()
+form.append('file', new Blob([pdfBytes], { type: 'application/pdf' }), 'drawing.pdf')
 
-- **Exported APIs**: Dependencies exported from utility files (like `test-utils.tsx`) that are intended for use but may not be directly imported yet
-- **Indirect usage**: Dependencies used by build tools, scripts, or other dependencies that static analysis can't detect
-- **Dynamic imports**: Dependencies loaded via dynamic imports or string-based requires
-- **Configuration files**: Dependencies used in config files that aren't detected by static analysis
-- **Type-only imports**: TypeScript type-only imports that are stripped at runtime
-
-## Repository Configuration
-
-`scripts/setup-github.sh` (checklist step 7) sets:
-
-* **Ruleset `main`** on the default branch: blocks deletion and force pushes; requires a pull request with 1 approval and resolved conversations, merged by squash only; requires CodeQL code scanning results with no alerts at high or higher; and requires these status checks, which must be up to date with `main`:
-    * `PR Results` (PR workflow)
-    * `Analysis Results` (Analysis workflow)
-    * `Validate Results` (PR Validate workflow)
-
-  Each is the summary job of a workflow that runs on every pull request.  The jobs they summarize (builds, deploys, tests, scans) are left out because they're skipped when their paths don't change, which would block merges.  Repository admins may bypass the ruleset only by merging a pull request.  Trivy results are still reported to the Security tab, but Trivy is deliberately not a merge gate because it fails often.  Other rules already in the ruleset (e.g. Copilot code review) are kept.
-* **Pull requests**: squash merging only, defaulting to the pull request title; suggest updating branches; allow auto-merge; delete head branches after merge.
-* **Private vulnerability reporting**, which [SECURITY.md](./SECURITY.md) points reporters to.
-
-### Packages
-
-Packages are available from your repository (link on right).  All should have visibility set to public for the workflows to run successfully.
-
-E.g. https://github.com/bcgov/quickstart-openshift/packages
-
-### Adding Team Members
-
-Don't forget to add your team members!  
-
-1.  Select Settings (gear, top right)  *> Collaborators and teams (under `Access`)
-2.  Click `Add people` or `Add teams`
-3.  Use the search box to find people or teams
-4.  Choose a role (read, triage, write, maintain, admin)
-5.  Click Add
-
-## Security & OWASP ASVS Alignment
-
-This repository is architected and hardened out-of-the-box to align with Levels 1 and 2 of the **OWASP Application Security Verification Standard (ASVS) v4.0.3**. A detailed security mapping matrix is documented in [SECURITY.md](./SECURITY.md#owasp-asvs-alignment), detailing our implementation of:
-* **Active WAF Defense:** Inline Coraza WAF running inside the Caddy reverse proxy.
-* **Tiered Isolation:** NetworkPolicies enforcing network boundaries between the frontend, backend, and database tiers.
-* **Platform/Container Hardening:** Read-only root filesystems, non-root execution, privilege escalation blocks, default seccomp profiles, and drop capabilities.
-* **Build-Time & Dynamic Testing:** Automated static analysis (Trivy, CodeQL), dependency auditing (Renovate, Knip), and weekly dynamic vulnerability scans (**OWASP ZAP**).
-
-## Container Hardening & Writable Paths
-
-Out of the box, the deployment templates in this repository enforce strict container-level security contexts:
-* **Read-Only Root Filesystems:** Containers cannot write to the root filesystem at runtime (`readOnlyRootFilesystem: true`).
-* **Non-Root Execution:** Containers are blocked from executing as the root user (`runAsNonRoot: true`).
-* **Privilege Escalation Blocked:** Containers cannot gain more privileges than their parent process (`allowPrivilegeEscalation: false`).
-
-### Handling Dynamic Writes
-If your application requires writing files at runtime (e.g., temporary caches, uploaded attachments, config logs):
-1. **Do not disable the security context.**
-2. Mount a memory-backed (`tmpfs`) volume on the writable path using `emptyDir` in `openshift.deploy.yml`:
-   ```yaml
-             volumeMounts:
-               - mountPath: /tmp
-                 name: tmp
-         volumes:
-           - name: tmp
-             emptyDir:
-               medium: Memory
-               sizeLimit: 256Mi
-   ```
-3. **Always specify a `sizeLimit`.** Running memory-backed volumes without a size limit allows a runaway container to exhaust the host node's RAM, triggering an out-of-memory (OOM) storm that will terminate other pods.
-
-# Workflows
-
-These workflows and actions enforce a pull request based flow.
-```mermaid
-flowchart TD
-    A1(PR_Env_1) -->|tests| B
-    A2(PR_Env_2) -->|tests| B
-    A3(PR_Env_3) -->|tests| B
-    Ad@{ shape: text, label: "..." }
-    An(PR Env n) -->|tests| B
-    B(TEST_Env) -->|tests| C(PROD_Env)
-
-    %% Define styles with good contrast for light/dark modes
-    %% PR Environments (using distinct, reasonably bright colors)
-    style A1 fill:#ffeadb,stroke:#ff8c42,stroke-width:2px,color:#5c3d1e  %% Light Orange/Orange
-    style A2 fill:#dbeaff,stroke:#4285f4,stroke-width:2px,color:#1a3f7a  %% Light Blue/Blue
-    style A3 fill:#dfffea,stroke:#34a853,stroke-width:2px,color:#154b24  %% Light Green/Green
-    style An fill:#fce8ff,stroke:#a142f4,stroke-width:2px,color:#4d1e7a  %% Light Purple/Purple
-    %% TEST Environment
-    style B fill:#e6f4ea,stroke:#34a853,stroke-width:3px,color:#154b24  %% Lighter Green/Green
-    %% PROD Environment
-    style C fill:#fff4d8,stroke:#fbbc05,stroke-width:3px,color:#7a5f01  %% Light Gold/Gold
-
-    %% Link style
-    linkStyle default stroke:#757575,stroke-width:1px
+const res = await fetch(
+  'https://signature-verifier-prod.apps.silver.devops.gov.bc.ca/api/v1/validate?profile=portage-notarius',
+  { method: 'POST', body: form },
+)
+if (!res.ok) {
+  throw new Error(`Signature validation failed: HTTP ${res.status}`)
+}
+const result = await res.json()
+// result.status === 'valid' && result.approvedSignaturesCount > 0
 ```
 
-Here's a more detailed view showing a single pull request.
+### Migrating from `ConsignO Server Automation` (`validatePDF`)
 
-```mermaid
-flowchart TD
-    A(Developer)
-    B(Pull Request)
-    Ba(Build Images,<br/>Deploy Images,<br/>E2E Tests)
-    Bb(Unit Tests,<br/>Security Analysis,<br/>Vulnerability Analysis)
-    Bc(Validate PR Title,<br/>Provide User Feedback)
-    Bd(Code Review)
-    C{Verify Results}
-    D(Merge)
-    E(Deploy Images to TEST)
-    F{E2E Tests,<br/>Load Tests,<br/>Analysis}
-    G(Deploy Images to PROD)
-    H(Tag Images as PROD)
+Apps currently calling `POST /validatePDF` on a per-app `consigno-verifio-notarius-server` sidecar (such as `bcgov/HOUS-permit-portal`) can replace the sidecar + `CSA_LICENSE` secret with a single `POST /api/v1/validate` call:
 
-    A --> B
-    B --> Ba --> C
-    B --> Bb --> C
-    B --> Bc --> C
-    B --> Bd --> C
-    C -- fail --> A
-    C -- pass --> D --> E --> F
-    F -- fail --> A
-    F -- pass --> G --> H
+- `status: "valid"` + `signatures[].approvedOrg` (`EGBC`, `AIBC`, `FPBC`) and `signatures[].subjectName` replace `DigitalSealSignatureFilter` regex checks.
+- `status: "unsigned"` replaces inspecting `response.result == "UNSIGNED"`.
+- `status: "unapproved_org"` indicates a cryptographically valid Notarius signature whose `subjectName` does not match the configured regulatory bodies.
+- `status: "invalid"` indicates hash tampering (`HASH_FAILURE`), untrusted chain, or failed validation (`signatures[].errors` / `subIndication`).
 
-    %% Define styles with good contrast for light/dark modes
-    %% Developer & PR Actions (Blue)
-    style A fill:#dbeaff,stroke:#4285f4,stroke-width:2px,color:#1a3f7a
-    style B fill:#dbeaff,stroke:#4285f4,stroke-width:2px,color:#1a3f7a
-    %% PR Checks & Validation (Light Green)
-    style Ba fill:#e6f4ea,stroke:#34a853,stroke-width:2px,color:#154b24
-    style Bb fill:#e6f4ea,stroke:#34a853,stroke-width:2px,color:#154b24
-    style Bc fill:#e6f4ea,stroke:#34a853,stroke-width:2px,color:#154b24
-    %% Code Review (Light Gold - requires attention)
-    style Bd fill:#fff4d8,stroke:#fbbc05,stroke-width:2px,color:#7a5f01
-    %% Decision Points (Purple)
-    style C fill:#fce8ff,stroke:#a142f4,stroke-width:2px,color:#4d1e7a
-    style F fill:#fce8ff,stroke:#a142f4,stroke-width:2px,color:#4d1e7a
-    %% Merge & TEST Deployment (Green)
-    style D fill:#dfffea,stroke:#34a853,stroke-width:2px,color:#154b24
-    style E fill:#e6f4ea,stroke:#34a853,stroke-width:3px,color:#154b24
-    %% PROD Deployment & Tagging (Gold)
-    style G fill:#fff4d8,stroke:#fbbc05,stroke-width:3px,color:#7a5f01
-    style H fill:#fff4d8,stroke:#fbbc05,stroke-width:3px,color:#7a5f01
+## Trust Profiles & Extending
 
-    %% Link style
-    linkStyle default stroke:#757575,stroke-width:1px
+See [`docs/trust-profiles.md`](docs/trust-profiles.md) for details on the `portage-notarius` and `default` profiles, historical `PAdES-BASELINE-T` handling, and adding new X.509 CAs or formats (`PAdES`, `XAdES`, `JAdES`, `CAdES`, `ASiC`). Background spike findings live in [`docs/spike-2-eu-dss-portage.md`](docs/spike-2-eu-dss-portage.md).
+
+## Local Development
+
+```bash
+# Start dss (8080) and backend (3000) locally
+docker compose up
+
+# Run backend lint, build, and tests
+cd backend
+npm ci
+npm run lint
+npm run format:check
+npm run build
+npm run test:cov
 ```
 
-## Pull Request
+## OpenShift Deployment Prerequisites
 
-Runs on pull request submission.
-
-* Provides safe, sandboxed deployment environments
-* Build action pushes to GitHub Container Registry (ghcr.io)
-* Build triggers select new builds vs reusing builds
-* Deploy only when changes are made
-* Deployment includes curl checks and optional penetration tests
-* Run tests (e2e, load, integration) when changes are made
-* Posts sticky comment with deployment links when deployments occur
-* Other checks and updates as required
-
-![](.github/graphics/pr-open.png)
-
-## Validation
-
-Runs on pull request submission.
-
-* Enforces conventional commits in PR title
-
-![](.github/graphics/pr-validate.png)
-
-
-## Analysis
-
-Runs on pull request submission or merge to the default branch.
-
-* Unit tests (should include coverage)
-* CodeQL/GitHub security reporting (now handled as GitHub default!)
-* Trivy password, vulnerability and security scanning
-
-![](.github/graphics/analysis.png)
-
-## Pull Request Closed
-
-Runs on pull request close or merge.
-
-* Cleans up OpenShift objects/artifacts
-* Merge retags successful build images as `latest`
-
-![](.github/graphics/pr-close.png)
-
-## Merge
-
-Runs on merge to main branch.
-
-* Code scanning and reporting to GitHub Security overview
-* Zero-downtime* TEST deployment
-* Penetration tests on TEST deployment (optional)
-* Zero-downtime* PROD deployment
-* Labels successful deployment images as PROD
-* Sysdig email alerts synced to PROD (no-op if `SYSDIG_API_TOKEN` is unset)
-
-\* excludes database changes
-
-![](.github/graphics/merge.png)
-
-## Scheduled
-
-Runs on scheduled job (cronjob) or workflow dispatch.
-
-* PR environment purge
-* Generate SchemaSpy documentation
-* Tests (e2e, load, integration) on TEST deployment
-
-![](.github/graphics/scheduled.png)
-
-# Maintenance Mode Automation
-
-This repository supports operating downstream projects in a low-maintenance, sustainment-only mode. When configured, dependency updates can be completely automated with zero manual intervention required for minor and patch updates, and optional hands-off major version bumps.
-
-## How It Works
-
-1. **Automated Dependency Updates**: The repository includes a `renovate.json` file configured to extend [`bcgov/renovate-config`](https://github.com/bcgov/renovate-config). This allows Mend Renovate to scan for updates, group related package updates together, and prepare automated Pull Requests.
-2. **Branch Protection & Gated Merging**: GitHub branch protection rules on `main` ensure that no PR is merged without verifying that the application remains functional.
-3. **CI/CD Validation**: The `PR` workflow builds, deploys, and runs tests against sandboxed preview environments; `PR Validate` enforces PR title/description conventions.
-4. **(Optional) Automerging**: If Renovate automerge is enabled and all required checks pass, Renovate can merge updates back to the `main` branch, triggering an automated rolling deployment.
-
-## Maintenance Mode Readiness Checklist
-
-Before transitioning an application utilizing this template to full maintenance mode, downstream teams should verify and meet the following criteria:
-
-- [ ] **Robust Automated Test Coverage**: A high test coverage threshold (e.g., 70% or higher for both statements and branches) should be enforced. Unit, integration, and end-to-end tests must be capable of catching regressions automatically.
-- [ ] **PR Preview Environments**: Ensure sandboxed preview environments deploy reliably to OpenShift for all pull requests.
-- [ ] **Automated Smoke Tests / Probes**: The application must implement runtime health checks that verify connectivity to database instances and external downstream services (e.g., S3, Keycloak, or mail services).
-- [ ] **Automerge Policies**: Verify that the Mend Renovate GitHub app is integrated and allowed to manage automerges for passing builds.
-
-## Runtime Health Checks & Smoke Testing
-
-To safely automate dependency updates, runtime health checks are mandatory to catch runtime connectivity failures before an update is merged.
-
-### QuickStart Health Check Implementation
-
-This template provides out-of-the-box support for self-healing and verification through container probes:
-- **NestJS Backend**: Implements an `/api/health` endpoint using NestJS Terminus (currently checks DB connectivity via Prisma).
-- **Frontend (Caddy/Vite)**: OpenShift readiness/liveness probes are configured to check `/` to confirm the web server is responsive and serving assets.
-
-*Tip: For a fully mature maintenance mode setup, customize the backend health checks to query external APIs and database migrations. If a dependency goes down, the health check should return `503 Service Unavailable`, blocking the automated merge.*
-
-## Automerge Expectations
-
-### When Automerge Occurs
-- Renovate creates PRs for dependency updates (npm packages, GitHub Actions, Docker base images).
-- All status checks pass successfully:
-  - Linting and unit tests complete.
-  - Preview environment successfully deploys to OpenShift.
-  - Automated smoke tests verify the preview environment is fully functional.
-- No merge conflicts are detected.
-
-### When Manual Intervention is Needed
-- A dependency upgrade causes compile, build, lint, or test failures.
-- A smoke test or deep health check fails post-deployment.
-- A security vulnerability scanner (e.g., Trivy or CodeQL) flags a new vulnerability.
-
-
+- **Namespaces & GitHub wiring:** Provision DEV/TEST/PROD OpenShift namespaces and run `scripts/setup.sh --plate <plate> --apply` (previews without `--apply`).
+- **Secrets/Variables:** Requires `vars.OC_SERVER`, `vars.OC_NAMESPACE`, and `secrets.OC_TOKEN` (repo, `test`, and `prod` environments); no database or `DB_PASSWORD` is used by the application.
+- **Resources:** `dss` requests `512Mi` / limits `2Gi` RAM (`JAVA_OPTS=-Xms512m -Xmx1536m`); `backend` limits `512Mi` RAM.
+- **Network egress:** `dss` pods require outbound HTTP/HTTPS (`80`/`443`) access to Notarius OCSP/CRL responders (e.g., `ocsp1.notarius.com`) for live revocation checks.
